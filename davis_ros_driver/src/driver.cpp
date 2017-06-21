@@ -106,7 +106,7 @@ DavisRosDriver::~DavisRosDriver()
 
 void DavisRosDriver::dataStop()
 {
-    caerLog(CAER_LOG_ERROR, "Exiting from driver node",  "executing data stop");
+    caerLog(CAER_LOG_INFO, "Exiting from driver node",  "executing data stop");
     ROS_INFO("Exiting from driver node, executing data stop");
     caerDeviceDataStop(davis_handle_);
     caerDeviceClose(&davis_handle_);
