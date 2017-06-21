@@ -28,5 +28,7 @@ int main(int argc, char* argv[])
 
   ros::spin();
   driver->dataStop();
+  delete driver;
+  
   return 0;
 }
