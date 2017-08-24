@@ -15,6 +15,7 @@
 
 #include "dvs_renderer/renderer.h"
 #include <std_msgs/Float32.h>
+#include <thread>
 
 namespace dvs_renderer {
 
@@ -27,6 +28,15 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   std::string display_method_str;
   nh_private.param<std::string>("display_method", display_method_str, "");
   display_method_ = (display_method_str == std::string("grayscale")) ? GRAYSCALE : RED_BLUE;
+
+  // get parameters of frame size unit
+  std::string frame_size_unit_str;
+  nh_private.param<std::string>("frame_size_unit", frame_size_unit_str, "");
+  frame_size_unit_ = (frame_size_unit_str == std::string("milliseconds")) ? MILLISECONDS : NUM_EVENTS;
+
+  // get frame size
+  const double default_frame_size = (frame_size_unit_ == MILLISECONDS) ? 33.0 : 5000;
+  nh_private.param<double>("frame_size", frame_size_, default_frame_size);
 
   // setup subscribers and publishers
   event_sub_ = nh_.subscribe("events", 1, &Renderer::eventsCallback, this);
@@ -48,6 +58,9 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   event_stats_[1].events_mean_lasttime_ = 0;
   event_stats_[1].events_mean_[0] = nh_.advertise<std_msgs::Float32>("events_on_mean_5", 1);
   event_stats_[1].events_mean_[1] = nh_.advertise<std_msgs::Float32>("events_off_mean_5", 1);
+
+  std::thread renderThread(&Renderer::renderFrameLoop, this);
+  renderThread.detach();
 }
 
 Renderer::~Renderer()
@@ -74,6 +87,8 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
 {
   image_tracking_.imageCallback(msg);
 
+  std::lock_guard<std::mutex> lock(data_mutex_);
+  ROS_DEBUG("Image buffer size: %d", images_.size());
   cv_bridge::CvImagePtr cv_ptr;
 
   try
@@ -86,96 +101,104 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
     return;
   }
 
-  // convert from grayscale to color image
-  cv::cvtColor(cv_ptr->image, last_image_, CV_GRAY2BGR);
-
-  if (!used_last_image_)
-  {
-    cv_bridge::CvImage cv_image;
-    last_image_.copyTo(cv_image.image);
-    cv_image.encoding = "bgr8";
-    std::cout << "publish image from callback" << std::endl;
-    image_pub_.publish(cv_image.toImageMsg());
-  }
-  used_last_image_ = false;
+  images_.insert(StampedImage(msg->header.stamp, cv_ptr->image));
+  clearImageBuffer();
 }
 
-void Renderer::eventsCallback(const dvs_msgs::EventArray::ConstPtr& msg)
+void Renderer::init(int width, int height)
 {
-  for (int i = 0; i < msg->events.size(); ++i)
+  sensor_size_ = cv::Size(width, height);
+}
+
+void Renderer::renderFrameLoop()
+{
+  static const size_t frame_rate_hz = 100;
+  static ros::Rate r(frame_rate_hz);
+
+  while (ros::ok())
   {
-    ++event_stats_[0].events_counter_[msg->events[i].polarity];
-    ++event_stats_[1].events_counter_[msg->events[i].polarity];
-  }
+    r.sleep();
 
-  publishStats();
-  image_tracking_.eventsCallback(msg);
+    if(sensor_size_.width <= 0 || sensor_size_.height <= 0 || events_.size() < 2)
+      continue;
 
-  // only create image if at least one subscriber
-  if (image_pub_.getNumSubscribers() > 0)
-  {
-    cv_bridge::CvImage cv_image;
-    if (msg->events.size() > 0)
+    cv::Mat event_img, event_img_color;
+
+    ros::Time current_time;
     {
-      cv_image.header.stamp = msg->events[msg->events.size()/2].ts;
-    }
+      std::lock_guard<std::mutex> lock(data_mutex_);
 
-    if (display_method_ == RED_BLUE)
-    {
-      cv_image.encoding = "bgr8";
-
-      if (last_image_.rows == msg->height && last_image_.cols == msg->width)
+      EventBuffer::iterator it_frame_start;
+      if(frame_size_unit_ == MILLISECONDS)
       {
-        last_image_.copyTo(cv_image.image);
-        used_last_image_ = true;
+        current_time = events_.back().ts;
+        const double frame_duration_s = frame_size_ / 1000.0;
+        it_frame_start = firstEventOlderThan(current_time - ros::Duration(frame_duration_s));
       }
       else
       {
-        cv_image.image = cv::Mat(msg->height, msg->width, CV_8UC3);
-        cv_image.image = cv::Scalar(0,0,0);
+        const size_t num_events = static_cast<size_t>(frame_size_);
+        if(events_.size() < num_events)
+        {
+          it_frame_start = events_.begin();
+        }
+        else
+        {
+          it_frame_start = events_.end() - num_events;
+        }
       }
 
-      for (int i = 0; i < msg->events.size(); ++i)
+      if(display_method_ == RED_BLUE)
       {
-        const int x = msg->events[i].x;
-        const int y = msg->events[i].y;
+        ROS_DEBUG("Query stamp: %f", events_.back().ts.toSec());
+        if(images_.empty())
+        {
+          event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+        }
+        else
+        {
+          static constexpr double max_img_delay_s = 0.5;
+          const ros::Time last_event_stamp = events_.back().ts;
+          const ros::Time last_img_stamp = images_.rbegin()->first;
+          ROS_DEBUG("Image stamp: %f", last_img_stamp);
+          if(std::fabs(last_img_stamp.toSec() - last_event_stamp.toSec()) <= max_img_delay_s)
+          {
+            event_img = images_.rbegin()->second;
+          }
+          else
+          {
+            event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+          }
+        }
 
-        cv_image.image.at<cv::Vec3b>(cv::Point(x, y)) = (
-            msg->events[i].polarity == true ? cv::Vec3b(255, 0, 0) : cv::Vec3b(0, 0, 255));
+        event_img.convertTo(event_img_color, CV_8UC3, 1.0, 0.0);
+        cv::cvtColor(event_img_color, event_img_color, cv::COLOR_GRAY2BGR);
+        drawEventsColor(it_frame_start, events_.end(), &event_img_color, true);
       }
+      else
+      {
+        event_img = cv::Mat::zeros(sensor_size_, CV_32F);
+        drawEventsGrayscale(it_frame_start, events_.end(), &event_img);
+
+        static constexpr double bmax = 5.0;
+        event_img = 255.0 * (event_img + bmax) / (2.0 * bmax);
+        event_img.convertTo(event_img, CV_8U, 1.0, 0.0);
+      }
+    }
+
+    // Publish event image
+    static cv_bridge::CvImage cv_image;
+
+    if(display_method_ == RED_BLUE)
+    {
+      cv_image.encoding = "bgr8";
+      cv_image.image = event_img_color;
     }
     else
     {
       cv_image.encoding = "mono8";
-      cv_image.image = cv::Mat(msg->height, msg->width, CV_8U);
-      cv_image.image = cv::Scalar(128);
-
-      cv::Mat on_events = cv::Mat(msg->height, msg->width, CV_8U);
-      on_events = cv::Scalar(0);
-
-      cv::Mat off_events = cv::Mat(msg->height, msg->width, CV_8U);
-      off_events = cv::Scalar(0);
-
-      // count events per pixels with polarity
-      for (int i = 0; i < msg->events.size(); ++i)
-      {
-        const int x = msg->events[i].x;
-        const int y = msg->events[i].y;
-
-        if (msg->events[i].polarity == 1)
-          on_events.at<uint8_t>(cv::Point(x, y))++;
-        else
-          off_events.at<uint8_t>(cv::Point(x, y))++;
-      }
-
-        // scale image
-      cv::normalize(on_events, on_events, 0, 128, cv::NORM_MINMAX, CV_8UC1);
-      cv::normalize(off_events, off_events, 0, 127, cv::NORM_MINMAX, CV_8UC1);
-
-      cv_image.image += on_events;
-      cv_image.image -= off_events;
+      cv_image.image = event_img;
     }
-
     image_pub_.publish(cv_image.toImageMsg());
 
     if (got_camera_info_ && undistorted_image_pub_.getNumSubscribers() > 0)
@@ -185,6 +208,102 @@ void Renderer::eventsCallback(const dvs_msgs::EventArray::ConstPtr& msg)
       cv::undistort(cv_image.image, cv_image2.image, camera_matrix_, dist_coeffs_);
       undistorted_image_pub_.publish(cv_image2.toImageMsg());
     }
+  }
+}
+
+void Renderer::drawEventsGrayscale(const EventBuffer::iterator& ev_first,
+                                   const EventBuffer::iterator& ev_last,
+                                   cv::Mat *out)
+{
+  CV_Assert(out->type() == CV_32F);
+
+  // Draw Events
+  auto draw = [] (float& p, const float val)
+  {
+    p = p+val;
+  };
+
+  for(EventBuffer::iterator e = ev_first; e != ev_last; ++e)
+  {
+    const float pol = (e->polarity) ? 1.f : -1.f;
+    draw(out->at<float>(e->y,   e->x),   pol);
+  }
+}
+
+void Renderer::drawEventsColor(const EventBuffer::iterator& ev_first,
+                               const EventBuffer::iterator& ev_last,
+                               cv::Mat *out,
+                               bool use_polarity)
+{
+  CV_Assert(out->type() == CV_8UC3);
+
+  // Draw Events
+  auto draw = [] (cv::Vec3b& p, const cv::Vec3b val)
+  {
+    p = val;
+  };
+
+  for(EventBuffer::iterator e = ev_first; e != ev_last; ++e)
+  {
+    cv::Vec3b pol;
+
+    if(use_polarity)
+    {
+      pol = ((e->polarity) ? cv::Vec3b(255, 0, 0) : cv::Vec3b(0, 0, 255));
+    }
+    else
+    {
+      pol = cv::Vec3b(255, 0, 0);
+    }
+    draw(out->at<cv::Vec3b>(e->y,   e->x),   pol);
+  }
+}
+
+void Renderer::eventsCallback(const dvs_msgs::EventArray::ConstPtr& msg)
+{
+  std::lock_guard<std::mutex> lock(data_mutex_);
+
+  if(sensor_size_.width <= 0)
+  {
+    init(msg->width, msg->height);
+  }
+
+  for(const dvs_msgs::Event& e : msg->events)
+  {
+    ++event_stats_[0].events_counter_[e.polarity];
+    ++event_stats_[1].events_counter_[e.polarity];
+    insertEventInSortedBuffer(e);
+  }
+  clearEventBuffer();
+
+  publishStats();
+  image_tracking_.eventsCallback(msg);
+}
+
+void Renderer::clearEventBuffer()
+{
+  static constexpr size_t event_history_size_ = 5000000;
+
+  if (events_.size() > event_history_size_)
+  {
+    size_t remove_events = events_.size() - event_history_size_;
+
+    events_.erase(events_.begin(),
+                  events_.begin() + remove_events);
+  }
+}
+
+void Renderer::clearImageBuffer()
+{
+  static constexpr size_t image_history_size_ = 30;
+
+  if (images_.size() > image_history_size_)
+  {
+    size_t remove_images = images_.size() - image_history_size_;
+    auto erase_iter = images_.begin();
+    std::advance(erase_iter, remove_images);
+    images_.erase(images_.begin(),
+                  erase_iter);
   }
 }
 
