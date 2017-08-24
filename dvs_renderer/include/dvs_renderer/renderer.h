@@ -108,6 +108,8 @@ private:
 
   bool got_camera_info_;
   cv::Mat camera_matrix_, dist_coeffs_;
+  std::string distortion_model_;
+  cv::Mat undistort_map1_, undistort_map2_;
 
   ros::Subscriber event_sub_;
   ros::Subscriber camera_info_sub_;

@@ -16,6 +16,7 @@
 #include "dvs_renderer/renderer.h"
 #include <std_msgs/Float32.h>
 #include <thread>
+#include <opencv2/calib3d/calib3d.hpp>
 
 namespace dvs_renderer {
 
@@ -72,6 +73,8 @@ Renderer::~Renderer()
 void Renderer::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
 {
   got_camera_info_ = true;
+  distortion_model_ = msg->distortion_model;
+  cv::Size sensor_size(msg->width, msg->height);
 
   camera_matrix_ = cv::Mat(3, 3, CV_64F);
   for (int i = 0; i < 3; i++)
@@ -81,6 +84,19 @@ void Renderer::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
   dist_coeffs_ = cv::Mat(msg->D.size(), 1, CV_64F);
   for (int i = 0; i < msg->D.size(); i++)
     dist_coeffs_.at<double>(i) = msg->D[i];
+
+  if(distortion_model_ == "equidistant")
+  {
+    cv::fisheye::initUndistortRectifyMap(camera_matrix_, dist_coeffs_,
+                                         (cv::Mat) cv::Matx33d::eye(), camera_matrix_,
+                                         sensor_size, CV_32FC1, undistort_map1_, undistort_map2_);
+  }
+  else
+  {
+    cv::initUndistortRectifyMap(camera_matrix_, dist_coeffs_,
+                                (cv::Mat) cv::Matx33d::eye(), camera_matrix_,
+                                sensor_size, CV_32FC1, undistort_map1_, undistort_map2_);
+  }
 }
 
 void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
@@ -205,7 +221,7 @@ void Renderer::renderFrameLoop()
     {
       cv_bridge::CvImage cv_image2;
       cv_image2.encoding = cv_image.encoding;
-      cv::undistort(cv_image.image, cv_image2.image, camera_matrix_, dist_coeffs_);
+      cv::remap(cv_image.image, cv_image2.image, undistort_map1_, undistort_map2_, CV_INTER_LINEAR);
       undistorted_image_pub_.publish(cv_image2.toImageMsg());
     }
   }
