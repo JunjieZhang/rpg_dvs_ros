@@ -66,6 +66,8 @@ private:
                        cv::Mat *out,
                        bool use_polarity);
 
+  void renderAndPublishImageAtTime(const ros::Time& frame_end_stamp);
+
   void cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg);
   void eventsCallback(const dvs_msgs::EventArray::ConstPtr& msg);
   void imageCallback(const sensor_msgs::Image::ConstPtr& msg);
@@ -129,6 +131,7 @@ private:
   cv::Size sensor_size_;
 
   size_t frame_rate_hz_;
+  bool synchronize_on_frames_;
   bool changed_frame_rate_;
 
   EventBuffer events_;

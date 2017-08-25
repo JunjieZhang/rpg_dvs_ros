@@ -67,6 +67,7 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
 
   frame_rate_hz_ = 60;
   changed_frame_rate_ = true;
+  synchronize_on_frames_ = false;
 
   std::thread renderThread(&Renderer::renderFrameLoop, this);
   renderThread.detach();
@@ -111,7 +112,6 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
 {
   image_tracking_.imageCallback(msg);
 
-  std::lock_guard<std::mutex> lock(data_mutex_);
   ROS_DEBUG("Image buffer size: %d", images_.size());
   cv_bridge::CvImagePtr cv_ptr;
 
@@ -125,32 +125,25 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
     return;
   }
 
-  images_.insert(StampedImage(msg->header.stamp, cv_ptr->image));
-  clearImageBuffer();
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    images_.insert(StampedImage(msg->header.stamp, cv_ptr->image));
+    clearImageBuffer();
+  }
+
+  if(synchronize_on_frames_)
+  {
+    renderAndPublishImageAtTime(msg->header.stamp);
+  }
 }
 
 void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config, uint32_t level) {
   std::lock_guard<std::mutex> lock(data_mutex_);
 
-  if(config.use_color)
-  {
-    display_method_ = RED_BLUE;
-  }
-  else
-  {
-    display_method_ = GRAYSCALE;
-  }
-
-  if(config.use_fixed_num_events)
-  {
-    frame_size_unit_ = NUM_EVENTS;
-  }
-  else
-  {
-    frame_size_unit_ = MILLISECONDS;
-  }
-
+  display_method_ = (config.use_color) ? RED_BLUE : GRAYSCALE;
+  frame_size_unit_ = (config.use_fixed_num_events) ? NUM_EVENTS : MILLISECONDS;
   frame_size_ = (double) config.frame_size;
+  synchronize_on_frames_ = config.synchronize_on_frames;
 
   if(config.frame_rate != frame_rate_hz_)
   {
@@ -170,103 +163,111 @@ void Renderer::renderFrameLoop()
 
   while (ros::ok())
   {
+    if(synchronize_on_frames_)
+      continue;
+
     if(changed_frame_rate_)
     {
       ROS_INFO("Changing framerate to %d Hz", frame_rate_hz_);
       r = ros::Rate(frame_rate_hz_);
       changed_frame_rate_ = false;
     }
+
     r.sleep();
 
-    if(sensor_size_.width <= 0 || sensor_size_.height <= 0 || events_.size() < 2)
-      continue;
+    renderAndPublishImageAtTime(events_.back().ts);
+  }
+}
 
-    cv::Mat event_img, event_img_color;
+void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
+{
+  if(sensor_size_.width <= 0 || sensor_size_.height <= 0 || events_.size() < 2)
+    return;
 
-    ros::Time current_time;
+  cv::Mat event_img, event_img_color;
+
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+
+    EventBuffer::iterator it_frame_start;
+    EventBuffer::iterator it_frame_end = firstEventOlderThan(frame_end_stamp);
+    if(frame_size_unit_ == MILLISECONDS)
     {
-      std::lock_guard<std::mutex> lock(data_mutex_);
-
-      EventBuffer::iterator it_frame_start;
-      if(frame_size_unit_ == MILLISECONDS)
-      {
-        current_time = events_.back().ts;
-        const double frame_duration_s = frame_size_ / 1000.0;
-        it_frame_start = firstEventOlderThan(current_time - ros::Duration(frame_duration_s));
-      }
-      else
-      {
-        const size_t num_events = static_cast<size_t>(frame_size_);
-        if(events_.size() < num_events)
-        {
-          it_frame_start = events_.begin();
-        }
-        else
-        {
-          it_frame_start = events_.end() - num_events;
-        }
-      }
-
-      if(display_method_ == RED_BLUE)
-      {
-        ROS_DEBUG("Query stamp: %f", events_.back().ts.toSec());
-        if(images_.empty())
-        {
-          event_img = cv::Mat::zeros(sensor_size_, CV_8U);
-        }
-        else
-        {
-          static constexpr double max_img_delay_s = 0.5;
-          const ros::Time last_event_stamp = events_.back().ts;
-          const ros::Time last_img_stamp = images_.rbegin()->first;
-          ROS_DEBUG("Image stamp: %f", last_img_stamp);
-          if(std::fabs(last_img_stamp.toSec() - last_event_stamp.toSec()) <= max_img_delay_s)
-          {
-            event_img = images_.rbegin()->second;
-          }
-          else
-          {
-            event_img = cv::Mat::zeros(sensor_size_, CV_8U);
-          }
-        }
-
-        event_img.convertTo(event_img_color, CV_8UC3, 1.0, 0.0);
-        cv::cvtColor(event_img_color, event_img_color, cv::COLOR_GRAY2BGR);
-        drawEventsColor(it_frame_start, events_.end(), &event_img_color, true);
-      }
-      else
-      {
-        event_img = cv::Mat::zeros(sensor_size_, CV_32F);
-        drawEventsGrayscale(it_frame_start, events_.end(), &event_img);
-
-        static constexpr double bmax = 5.0;
-        event_img = 255.0 * (event_img + bmax) / (2.0 * bmax);
-        event_img.convertTo(event_img, CV_8U, 1.0, 0.0);
-      }
-    }
-
-    // Publish event image
-    static cv_bridge::CvImage cv_image;
-
-    if(display_method_ == RED_BLUE)
-    {
-      cv_image.encoding = "bgr8";
-      cv_image.image = event_img_color;
+      const double frame_duration_s = frame_size_ / 1000.0;
+      it_frame_start = firstEventOlderThan(frame_end_stamp - ros::Duration(frame_duration_s));
     }
     else
     {
-      cv_image.encoding = "mono8";
-      cv_image.image = event_img;
+      const size_t num_events = static_cast<size_t>(frame_size_);
+      if(std::distance(events_.begin(), it_frame_end) < num_events)
+      {
+        it_frame_start = events_.begin();
+      }
+      else
+      {
+        it_frame_start = it_frame_end - num_events;
+      }
     }
-    image_pub_.publish(cv_image.toImageMsg());
 
-    if (got_camera_info_ && undistorted_image_pub_.getNumSubscribers() > 0)
+    if(display_method_ == RED_BLUE)
     {
-      cv_bridge::CvImage cv_image2;
-      cv_image2.encoding = cv_image.encoding;
-      cv::remap(cv_image.image, cv_image2.image, undistort_map1_, undistort_map2_, CV_INTER_LINEAR);
-      undistorted_image_pub_.publish(cv_image2.toImageMsg());
+      ROS_DEBUG("Query stamp: %f", events_.back().ts.toSec());
+      if(images_.empty())
+      {
+        event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+      }
+      else
+      {
+        static constexpr double max_img_delay_s = 0.5;
+        const ros::Time last_event_stamp = events_.back().ts;
+        const ros::Time last_img_stamp = images_.rbegin()->first;
+        ROS_DEBUG("Image stamp: %f", last_img_stamp);
+        if(synchronize_on_frames_ || (std::fabs(last_img_stamp.toSec() - last_event_stamp.toSec()) <= max_img_delay_s))
+        {
+          event_img = images_.rbegin()->second;
+        }
+        else
+        {
+          event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+        }
+      }
+
+      event_img.convertTo(event_img_color, CV_8UC3, 1.0, 0.0);
+      cv::cvtColor(event_img_color, event_img_color, cv::COLOR_GRAY2BGR);
+      drawEventsColor(it_frame_start, it_frame_end, &event_img_color, true);
     }
+    else
+    {
+      event_img = cv::Mat::zeros(sensor_size_, CV_32F);
+      drawEventsGrayscale(it_frame_start, it_frame_end, &event_img);
+
+      static constexpr double bmax = 5.0;
+      event_img = 255.0 * (event_img + bmax) / (2.0 * bmax);
+      event_img.convertTo(event_img, CV_8U, 1.0, 0.0);
+    }
+  }
+
+  // Publish event image
+  static cv_bridge::CvImage cv_image;
+
+  if(display_method_ == RED_BLUE)
+  {
+    cv_image.encoding = "bgr8";
+    cv_image.image = event_img_color;
+  }
+  else
+  {
+    cv_image.encoding = "mono8";
+    cv_image.image = event_img;
+  }
+  image_pub_.publish(cv_image.toImageMsg());
+
+  if (got_camera_info_ && undistorted_image_pub_.getNumSubscribers() > 0)
+  {
+    cv_bridge::CvImage cv_image2;
+    cv_image2.encoding = cv_image.encoding;
+    cv::remap(cv_image.image, cv_image2.image, undistort_map1_, undistort_map2_, CV_INTER_LINEAR);
+    undistorted_image_pub_.publish(cv_image2.toImageMsg());
   }
 }
 
