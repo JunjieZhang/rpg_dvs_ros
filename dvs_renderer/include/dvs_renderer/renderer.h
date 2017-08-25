@@ -75,6 +75,24 @@ private:
   void imageCallback(const sensor_msgs::Image::ConstPtr& msg);
   void changeParameterscallback(dvs_renderer::DVS_RendererConfig &config, uint32_t level);
 
+  void reset()
+  {
+    got_camera_info_ = false;
+    events_.clear();
+    images_.clear();
+    last_stamps_map_.clear();
+    last_polarity_map_.clear();
+    sensor_size_ = cv::Size(0,0);
+
+    for (int i = 0; i < 2; ++i)
+      for (int k = 0; k < 2; ++k)
+        event_stats_[i].events_counter_[k] = 0;
+    event_stats_[0].dt = 1;
+    event_stats_[0].events_mean_lasttime_ = 0;
+    event_stats_[1].dt = 5;
+    event_stats_[1].events_mean_lasttime_ = 0;
+  }
+
   void publishStats();
 
   // Insert an event in the buffer while keeping the buffer sorted

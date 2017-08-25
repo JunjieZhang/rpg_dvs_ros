@@ -23,8 +23,6 @@ namespace dvs_renderer {
 Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
     image_tracking_(nh)
 {
-  got_camera_info_ = false;
-
   // setup subscribers and publishers
   event_sub_ = nh_.subscribe("events", 1, &Renderer::eventsCallback, this);
   camera_info_sub_ = nh_.subscribe("camera_info", 1, &Renderer::cameraInfoCallback, this);
@@ -39,21 +37,16 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   server_.reset(new dynamic_reconfigure::Server<dvs_renderer::DVS_RendererConfig>(nh_private));
   server_->setCallback(dynamic_reconfigure_callback_);
 
-  for (int i = 0; i < 2; ++i)
-    for (int k = 0; k < 2; ++k)
-      event_stats_[i].events_counter_[k] = 0;
-  event_stats_[0].dt = 1;
-  event_stats_[0].events_mean_lasttime_ = 0;
   event_stats_[0].events_mean_[0] = nh_.advertise<std_msgs::Float32>("events_on_mean_1", 1);
   event_stats_[0].events_mean_[1] = nh_.advertise<std_msgs::Float32>("events_off_mean_1", 1);
-  event_stats_[1].dt = 5;
-  event_stats_[1].events_mean_lasttime_ = 0;
   event_stats_[1].events_mean_[0] = nh_.advertise<std_msgs::Float32>("events_on_mean_5", 1);
   event_stats_[1].events_mean_[1] = nh_.advertise<std_msgs::Float32>("events_off_mean_5", 1);
 
   frame_rate_hz_ = 60;
   changed_frame_rate_ = true;
   synchronize_on_frames_ = false;
+
+  reset();
 
   std::thread renderThread(&Renderer::renderFrameLoop, this);
   renderThread.detach();
@@ -354,6 +347,23 @@ void Renderer::eventsCallback(const dvs_msgs::EventArray::ConstPtr& msg)
   if(sensor_size_.width <= 0)
   {
     init(msg->width, msg->height);
+  }
+
+  // Check if the timestamps of the incoming events are inconsistent with the ones in the buffer.
+  // This happens when a new sensor with a different time reference is plugged in, or
+  // when a different rosbag is being played.
+  // When that happens, reset the renderer.
+  if(!msg->events.empty() && !events_.empty())
+  {
+    static constexpr double max_time_diff_before_reset_s = 0.5;
+    const ros::Time stamp_first_event = msg->events[0].ts;
+    const double dt = std::fabs(stamp_first_event.toSec() - events_.back().ts.toSec());
+    if(dt >= max_time_diff_before_reset_s)
+    {
+      ROS_INFO("Inconsistent timestamps detected (new: %f, old: %f), resetting.", stamp_first_event.toSec(), events_.back().ts.toSec());
+      reset();
+      init(msg->width, msg->height);
+    }
   }
 
   for(const dvs_msgs::Event& e : msg->events)
