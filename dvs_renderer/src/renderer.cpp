@@ -177,13 +177,13 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
-    if(frame_size_unit_ == NUM_EVENTS || frame_size_unit_ == MILLISECONDS)
+    if(frame_size_unit_ == NUM_EVENTS || frame_size_unit_ == MICROSECONDS)
     {
       EventBuffer::iterator it_frame_start;
       EventBuffer::iterator it_frame_end = firstEventOlderThan(frame_end_stamp);
-      if(frame_size_unit_ == MILLISECONDS)
+      if(frame_size_unit_ == MICROSECONDS)
       {
-        const double frame_duration_s = frame_size_ / 1000.0;
+        const double frame_duration_s = frame_size_ / 1000000.0;
         it_frame_start = firstEventOlderThan(frame_end_stamp - ros::Duration(frame_duration_s));
       }
       else

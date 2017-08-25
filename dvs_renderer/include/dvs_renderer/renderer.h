@@ -180,7 +180,7 @@ private:
 
   enum FrameSizeUnit
   {
-    MILLISECONDS, NUM_EVENTS, PARTIAL_DI_DT
+    MICROSECONDS, NUM_EVENTS, PARTIAL_DI_DT
   } frame_size_unit_;
 
   double frame_size_;
