@@ -25,20 +25,6 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
 {
   got_camera_info_ = false;
 
-  // get parameters of display method
-  std::string display_method_str;
-  nh_private.param<std::string>("display_method", display_method_str, "");
-  display_method_ = (display_method_str == std::string("grayscale")) ? GRAYSCALE : RED_BLUE;
-
-  // get parameters of frame size unit
-  std::string frame_size_unit_str;
-  nh_private.param<std::string>("frame_size_unit", frame_size_unit_str, "");
-  frame_size_unit_ = (frame_size_unit_str == std::string("milliseconds")) ? MILLISECONDS : NUM_EVENTS;
-
-  // get frame size
-  const double default_frame_size = (frame_size_unit_ == MILLISECONDS) ? 33.0 : 5000;
-  nh_private.param<double>("frame_size", frame_size_, default_frame_size);
-
   // setup subscribers and publishers
   event_sub_ = nh_.subscribe("events", 1, &Renderer::eventsCallback, this);
   camera_info_sub_ = nh_.subscribe("camera_info", 1, &Renderer::cameraInfoCallback, this);
@@ -141,7 +127,7 @@ void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config
   std::lock_guard<std::mutex> lock(data_mutex_);
 
   display_method_ = (config.use_color) ? RED_BLUE : GRAYSCALE;
-  frame_size_unit_ = (config.use_fixed_num_events) ? NUM_EVENTS : MILLISECONDS;
+  frame_size_unit_ = (FrameSizeUnit) config.rendering_method;
   frame_size_ = (double) config.frame_size;
   synchronize_on_frames_ = config.synchronize_on_frames;
 
@@ -155,6 +141,15 @@ void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config
 void Renderer::init(int width, int height)
 {
   sensor_size_ = cv::Size(width, height);
+  ROS_INFO("Initialized with size: (%d x %d)", sensor_size_.width, sensor_size_.height);
+
+  last_stamps_map_ = TimestampMap(sensor_size_.width * sensor_size_.height);
+  last_polarity_map_ = PolarityMap(sensor_size_.width * sensor_size_.height);
+  for(size_t i=0; i<sensor_size_.width * sensor_size_.height; ++i)
+  {
+    last_stamps_map_[i] = ros::Time(0.0);
+    last_polarity_map_[i] = true;
+  }
 }
 
 void Renderer::renderFrameLoop()
@@ -189,68 +184,100 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
-    EventBuffer::iterator it_frame_start;
-    EventBuffer::iterator it_frame_end = firstEventOlderThan(frame_end_stamp);
-    if(frame_size_unit_ == MILLISECONDS)
+    if(frame_size_unit_ == NUM_EVENTS || frame_size_unit_ == MILLISECONDS)
     {
-      const double frame_duration_s = frame_size_ / 1000.0;
-      it_frame_start = firstEventOlderThan(frame_end_stamp - ros::Duration(frame_duration_s));
-    }
-    else
-    {
-      const size_t num_events = static_cast<size_t>(frame_size_);
-      if(std::distance(events_.begin(), it_frame_end) < num_events)
+      EventBuffer::iterator it_frame_start;
+      EventBuffer::iterator it_frame_end = firstEventOlderThan(frame_end_stamp);
+      if(frame_size_unit_ == MILLISECONDS)
       {
-        it_frame_start = events_.begin();
+        const double frame_duration_s = frame_size_ / 1000.0;
+        it_frame_start = firstEventOlderThan(frame_end_stamp - ros::Duration(frame_duration_s));
       }
       else
       {
-        it_frame_start = it_frame_end - num_events;
-      }
-    }
-
-    if(display_method_ == RED_BLUE)
-    {
-      ROS_DEBUG("Query stamp: %f", events_.back().ts.toSec());
-      if(images_.empty())
-      {
-        event_img = cv::Mat::zeros(sensor_size_, CV_8U);
-      }
-      else
-      {
-        static constexpr double max_img_delay_s = 0.5;
-        const ros::Time last_event_stamp = events_.back().ts;
-        const ros::Time last_img_stamp = images_.rbegin()->first;
-        ROS_DEBUG("Image stamp: %f", last_img_stamp);
-        if(synchronize_on_frames_ || (std::fabs(last_img_stamp.toSec() - last_event_stamp.toSec()) <= max_img_delay_s))
+        const size_t num_events = static_cast<size_t>(frame_size_);
+        if(std::distance(events_.begin(), it_frame_end) < num_events)
         {
-          event_img = images_.rbegin()->second;
+          it_frame_start = events_.begin();
         }
         else
         {
-          event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+          it_frame_start = it_frame_end - num_events;
         }
       }
 
-      event_img.convertTo(event_img_color, CV_8UC3, 1.0, 0.0);
-      cv::cvtColor(event_img_color, event_img_color, cv::COLOR_GRAY2BGR);
-      drawEventsColor(it_frame_start, it_frame_end, &event_img_color, true);
+      if(display_method_ == RED_BLUE)
+      {
+        ROS_DEBUG("Query stamp: %f", events_.back().ts.toSec());
+        if(images_.empty())
+        {
+          event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+        }
+        else
+        {
+          static constexpr double max_img_delay_s = 0.5;
+          const ros::Time last_event_stamp = events_.back().ts;
+          const ros::Time last_img_stamp = images_.rbegin()->first;
+          ROS_DEBUG("Image stamp: %f", last_img_stamp);
+          if(synchronize_on_frames_ || (std::fabs(last_img_stamp.toSec() - last_event_stamp.toSec()) <= max_img_delay_s))
+          {
+            event_img = images_.rbegin()->second;
+          }
+          else
+          {
+            event_img = cv::Mat::zeros(sensor_size_, CV_8U);
+          }
+        }
+
+        event_img.convertTo(event_img_color, CV_8UC3, 1.0, 0.0);
+        cv::cvtColor(event_img_color, event_img_color, cv::COLOR_GRAY2BGR);
+        drawEventsColor(it_frame_start, it_frame_end, &event_img_color, true);
+      }
+      else
+      {
+        event_img = cv::Mat::zeros(sensor_size_, CV_32F);
+        drawEventsGrayscale(it_frame_start, it_frame_end, &event_img);
+
+        static constexpr double bmax = 5.0;
+        event_img = 255.0 * (event_img + bmax) / (2.0 * bmax);
+        event_img.convertTo(event_img, CV_8U, 1.0, 0.0);
+      }
     }
     else
     {
-      event_img = cv::Mat::zeros(sensor_size_, CV_32F);
-      drawEventsGrayscale(it_frame_start, it_frame_end, &event_img);
-
-      static constexpr double bmax = 5.0;
-      event_img = 255.0 * (event_img + bmax) / (2.0 * bmax);
-      event_img.convertTo(event_img, CV_8U, 1.0, 0.0);
+      event_img = cv::Mat::zeros(sensor_size_, CV_64F);
+      std::vector<double> abs_dIdt_s;
+      for(int y=0; y<sensor_size_.height; ++y)
+      {
+        for(int x=0; x<sensor_size_.width; ++x)
+        {
+          const ros::Time last_stamp_at_xy = last_stamps_map_[x + y * sensor_size_.width];
+          double dIdt = 0.0;
+          if(last_stamp_at_xy.toSec() > 0)
+          {
+            const double dt = (frame_end_stamp - last_stamp_at_xy).toSec();
+            const double pol = (last_polarity_map_[x + y*sensor_size_.width]) ? 1.0 : -1.0;
+            dIdt = (dt > 0) ? pol / dt : 0.0;
+            event_img.at<double>(y,x) = dIdt;
+          }
+          abs_dIdt_s.push_back(dIdt);
+        }
+      }
+      std::sort(abs_dIdt_s.begin(), abs_dIdt_s.end());
+      static constexpr double percentile = 0.98;
+      static constexpr double max_dIdt = 60.0; // unit: intensity levels per second
+      double robust_max_dIdt = abs_dIdt_s[static_cast<int>(percentile * abs_dIdt_s.size() + 0.5)];
+      robust_max_dIdt = std::max(max_dIdt, robust_max_dIdt);
+      ROS_DEBUG("Robust max dIdt: %f", robust_max_dIdt);
+      event_img = 255.0 * (event_img + robust_max_dIdt) / (2.0 * robust_max_dIdt);
+      event_img.convertTo(event_img, CV_8U);
     }
   }
 
   // Publish event image
   static cv_bridge::CvImage cv_image;
 
-  if(display_method_ == RED_BLUE)
+  if(frame_size_unit_ != PARTIAL_DI_DT && display_method_ == RED_BLUE)
   {
     cv_image.encoding = "bgr8";
     cv_image.image = event_img_color;
@@ -260,6 +287,7 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
     cv_image.encoding = "mono8";
     cv_image.image = event_img;
   }
+  cv_image.header.stamp = frame_end_stamp;
   image_pub_.publish(cv_image.toImageMsg());
 
   if (got_camera_info_ && undistorted_image_pub_.getNumSubscribers() > 0)

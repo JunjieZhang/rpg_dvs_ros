@@ -1,6 +1,9 @@
 <launch>
   <!-- camera driver -->
-  <node name="davis_ros_driver" pkg="davis_ros_driver" type="davis_ros_driver" />
+  <node name="davis_ros_driver" pkg="davis_ros_driver" type="davis_ros_driver">
+    <param name="streaming_rate" value="0"/>
+    <param name="max_events" value="1500"/>
+  </node>
 
   <!-- visualization -->
   <node name="dvs_renderer" pkg="dvs_renderer" type="dvs_renderer" output="screen">
@@ -9,9 +12,6 @@
     <remap from="events" to="/dvs/events" />
     <remap from="image" to="/dvs/image_raw" />
     <remap from="camera_info" to="/dvs/camera_info" />
-
-    <param name="frame_size_unit" value="num_events"/>
-    <param name="frame_size" value="4000"/>
   </node>
 
   <!-- display -->

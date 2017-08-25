@@ -44,6 +44,8 @@ namespace dvs_renderer
 using EventBuffer = std::deque<dvs_msgs::Event>;
 using StampedImage = std::pair<ros::Time, cv::Mat>;
 using ImageBuffer = std::map<ros::Time, cv::Mat>;
+using TimestampMap = std::vector<ros::Time>;
+using PolarityMap = std::vector<uchar>;
 
 class Renderer {
 public:
@@ -90,6 +92,10 @@ private:
       j--;
     }
     events_[j+1] = e;
+
+    const dvs_msgs::Event& last_event = events_.back();
+    last_stamps_map_[e.x + e.y * sensor_size_.width] = last_event.ts;
+    last_polarity_map_[e.x + e.y * sensor_size_.width] = last_event.polarity;
   }
 
   void clearEventBuffer();
@@ -134,6 +140,9 @@ private:
   bool synchronize_on_frames_;
   bool changed_frame_rate_;
 
+  TimestampMap last_stamps_map_; // stamp of the last event that fell at every pixel
+  PolarityMap last_polarity_map_; // polarity of the last event that fell at every pixel
+
   EventBuffer events_;
   ImageBuffer images_;
   std::mutex data_mutex_;
@@ -153,7 +162,7 @@ private:
 
   enum FrameSizeUnit
   {
-    MILLISECONDS, NUM_EVENTS
+    MILLISECONDS, NUM_EVENTS, PARTIAL_DI_DT
   } frame_size_unit_;
 
   double frame_size_;
