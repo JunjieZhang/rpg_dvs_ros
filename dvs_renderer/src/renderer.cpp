@@ -48,6 +48,11 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   image_pub_ = it_.advertise("dvs_rendering", 1);
   undistorted_image_pub_ = it_.advertise("dvs_undistorted", 1);
 
+  // Dynamic reconfigure
+  dynamic_reconfigure_callback_ = boost::bind(&Renderer::changeParameterscallback, this, _1, _2);
+  server_.reset(new dynamic_reconfigure::Server<dvs_renderer::DVS_RendererConfig>(nh_private));
+  server_->setCallback(dynamic_reconfigure_callback_);
+
   for (int i = 0; i < 2; ++i)
     for (int k = 0; k < 2; ++k)
       event_stats_[i].events_counter_[k] = 0;
@@ -59,6 +64,9 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   event_stats_[1].events_mean_lasttime_ = 0;
   event_stats_[1].events_mean_[0] = nh_.advertise<std_msgs::Float32>("events_on_mean_5", 1);
   event_stats_[1].events_mean_[1] = nh_.advertise<std_msgs::Float32>("events_off_mean_5", 1);
+
+  frame_rate_hz_ = 60;
+  changed_frame_rate_ = true;
 
   std::thread renderThread(&Renderer::renderFrameLoop, this);
   renderThread.detach();
@@ -121,6 +129,36 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
   clearImageBuffer();
 }
 
+void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config, uint32_t level) {
+  std::lock_guard<std::mutex> lock(data_mutex_);
+
+  if(config.use_color)
+  {
+    display_method_ = RED_BLUE;
+  }
+  else
+  {
+    display_method_ = GRAYSCALE;
+  }
+
+  if(config.use_fixed_num_events)
+  {
+    frame_size_unit_ = NUM_EVENTS;
+  }
+  else
+  {
+    frame_size_unit_ = MILLISECONDS;
+  }
+
+  frame_size_ = (double) config.frame_size;
+
+  if(config.frame_rate != frame_rate_hz_)
+  {
+    changed_frame_rate_ = true;
+    frame_rate_hz_ = config.frame_rate;
+  }
+}
+
 void Renderer::init(int width, int height)
 {
   sensor_size_ = cv::Size(width, height);
@@ -128,11 +166,16 @@ void Renderer::init(int width, int height)
 
 void Renderer::renderFrameLoop()
 {
-  static const size_t frame_rate_hz = 100;
-  static ros::Rate r(frame_rate_hz);
+  ros::Rate r(frame_rate_hz_);
 
   while (ros::ok())
   {
+    if(changed_frame_rate_)
+    {
+      ROS_INFO("Changing framerate to %d Hz", frame_rate_hz_);
+      r = ros::Rate(frame_rate_hz_);
+      changed_frame_rate_ = false;
+    }
     r.sleep();
 
     if(sensor_size_.width <= 0 || sensor_size_.height <= 0 || events_.size() < 2)

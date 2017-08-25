@@ -35,6 +35,9 @@
 #include <deque>
 #include <mutex>
 
+#include <dynamic_reconfigure/server.h>
+#include <dvs_renderer/DVS_RendererConfig.h>
+
 namespace dvs_renderer
 {
 
@@ -66,6 +69,7 @@ private:
   void cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg);
   void eventsCallback(const dvs_msgs::EventArray::ConstPtr& msg);
   void imageCallback(const sensor_msgs::Image::ConstPtr& msg);
+  void changeParameterscallback(dvs_renderer::DVS_RendererConfig &config, uint32_t level);
 
   void publishStats();
 
@@ -119,7 +123,13 @@ private:
 
   image_transport::Subscriber image_sub_;
 
+  boost::shared_ptr<dynamic_reconfigure::Server<dvs_renderer::DVS_RendererConfig> > server_;
+  dynamic_reconfigure::Server<dvs_renderer::DVS_RendererConfig>::CallbackType dynamic_reconfigure_callback_;
+
   cv::Size sensor_size_;
+
+  size_t frame_rate_hz_;
+  bool changed_frame_rate_;
 
   EventBuffer events_;
   ImageBuffer images_;
