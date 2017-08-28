@@ -234,6 +234,7 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
     }
     else
     {
+      const double decay_s = frame_size_ / 1000000.0;
       event_img = cv::Mat::zeros(sensor_size_, CV_64F);
       for(int y=0; y<sensor_size_.height; ++y)
       {
@@ -248,15 +249,13 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
             {
               const double dt_s = (frame_end_stamp - last_stamp_at_xy).toSec();
               const double pol = (first_event_at_xy_before_frame_end.polarity) ? 1.0 : -1.0;
-              const double decay_s = frame_size_ / 1000000.0;
               dIdt = pol * std::exp(-dt_s / decay_s);
               event_img.at<double>(y,x) = dIdt;
             }
           }
         }
       }
-      const double max_dIdt = std::log(5.0);
-      event_img = 255.0 * (event_img + max_dIdt) / (2.0 * max_dIdt);
+      event_img = 255.0 * (event_img + 1.0) / 2.0;
       event_img.convertTo(event_img, CV_8U);
     }
   }
