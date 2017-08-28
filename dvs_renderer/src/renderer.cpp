@@ -248,7 +248,6 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
             {
               const double dt_s = (frame_end_stamp - last_stamp_at_xy).toSec();
               const double pol = (first_event_at_xy_before_frame_end.polarity) ? 1.0 : -1.0;
-              dIdt = (dt_s > 0) ? pol / dt_s : 0.0;
               const double decay_s = frame_size_ / 1000000.0;
               dIdt = pol * std::exp(-dt_s / decay_s);
               event_img.at<double>(y,x) = dIdt;
