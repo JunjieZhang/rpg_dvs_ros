@@ -137,13 +137,8 @@ void Renderer::init(int width, int height)
   sensor_size_ = cv::Size(width, height);
   ROS_INFO("Initialized with size: (%d x %d)", sensor_size_.width, sensor_size_.height);
 
-  last_stamps_map_ = TimestampMap(sensor_size_.width * sensor_size_.height);
-  last_polarity_map_ = PolarityMap(sensor_size_.width * sensor_size_.height);
-  for(size_t i=0; i<sensor_size_.width * sensor_size_.height; ++i)
-  {
-    last_stamps_map_[i] = ros::Time(0.0);
-    last_polarity_map_[i] = true;
-  }
+  static constexpr int max_num_events_in_history_per_pixel = 20;
+  events_history_.reset(new EventHistoryMap(width, height, max_num_events_in_history_per_pixel));
 }
 
 void Renderer::renderFrameLoop()
@@ -244,16 +239,20 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
       {
         for(int x=0; x<sensor_size_.width; ++x)
         {
-          const ros::Time last_stamp_at_xy = last_stamps_map_[x + y * sensor_size_.width];
-          double dIdt = 0.0;
-          if(last_stamp_at_xy.toSec() > 0)
+          dvs_msgs::Event first_event_at_xy_before_frame_end;
+          if(events_history_->first_event_at_xy_older_than_t(x, y, frame_end_stamp, &first_event_at_xy_before_frame_end))
           {
-            const double dt_s = (frame_end_stamp - last_stamp_at_xy).toSec();
-            const double pol = (last_polarity_map_[x + y*sensor_size_.width]) ? 1.0 : -1.0;
-            dIdt = (dt_s > 0) ? pol / dt_s : 0.0;
-            const double decay_s = frame_size_ / 1000000.0;
-            dIdt = pol * std::exp(-dt_s / decay_s);
-            event_img.at<double>(y,x) = dIdt;
+            const ros::Time& last_stamp_at_xy = first_event_at_xy_before_frame_end.ts;
+            double dIdt = 0.0;
+            if(last_stamp_at_xy.toSec() > 0)
+            {
+              const double dt_s = (frame_end_stamp - last_stamp_at_xy).toSec();
+              const double pol = (first_event_at_xy_before_frame_end.polarity) ? 1.0 : -1.0;
+              dIdt = (dt_s > 0) ? pol / dt_s : 0.0;
+              const double decay_s = frame_size_ / 1000000.0;
+              dIdt = pol * std::exp(-dt_s / decay_s);
+              event_img.at<double>(y,x) = dIdt;
+            }
           }
         }
       }

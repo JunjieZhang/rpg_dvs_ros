@@ -47,6 +47,85 @@ using ImageBuffer = std::map<ros::Time, cv::Mat>;
 using TimestampMap = std::vector<ros::Time>;
 using PolarityMap = std::vector<uchar>;
 
+// A data structure storing the last K events for every pixel
+class EventHistoryMap {
+public:
+
+  EventHistoryMap(int width, int height, int K)
+  {
+    width_ = width;
+    height_ = height;
+    K_ = K;
+    events_ = std::vector<EventBuffer>(width_ * height_, EventBuffer());
+  }
+
+  void insertEvent(const dvs_msgs::Event& e)
+  {
+    if(!contains(e.x, e.y))
+    {
+      ROS_WARN("Tried to insert event at (%d, %d) which is out of bounds of the sensor (%d, %d)", e.x, e.y, width_, height_);
+      return;
+    }
+    else
+    {
+      EventBuffer& events_at_xy = get_events_at_xy(e.x, e.y);
+      events_at_xy.push_back(e);
+      if(events_at_xy.size() > K_)
+      {
+        events_at_xy.pop_front();
+      }
+    }
+  }
+
+  bool first_event_at_xy_older_than_t(const size_t x, const size_t y, const ros::Time& t, dvs_msgs::Event* ev)
+  {
+    if(!contains(x, y))
+    {
+      ROS_WARN("Tried to query event at (%d, %d) which is out of bounds of the sensor (%d, %d)", x, y, width_, height_);
+      return false;
+    }
+
+    EventBuffer& events_at_xy = get_events_at_xy(x, y);
+    if(events_at_xy.empty())
+    {
+      return false;
+    }
+
+    for(auto it = events_at_xy.rbegin(); it != events_at_xy.rend(); ++it)
+    {
+      const dvs_msgs::Event& e = *it;
+      if(e.ts < t)
+      {
+        *ev = *it;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void clear()
+  {
+    events_.clear();
+  }
+
+private:
+
+  bool contains(const size_t x, const size_t y)
+  {
+    return !(x < 0 || x >= width_ || y < 0 || y >= height_);
+  }
+
+  inline EventBuffer& get_events_at_xy(const size_t x, const size_t y)
+  {
+    return events_[x + width_ * y];
+  }
+
+  size_t width_;
+  size_t height_;
+  size_t K_;
+  std::vector<EventBuffer> events_;
+};
+
 class Renderer {
 public:
   Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private);
@@ -80,8 +159,10 @@ private:
     got_camera_info_ = false;
     events_.clear();
     images_.clear();
-    last_stamps_map_.clear();
-    last_polarity_map_.clear();
+
+    if(events_history_)
+      events_history_->clear();
+
     sensor_size_ = cv::Size(0,0);
 
     for (int i = 0; i < 2; ++i)
@@ -112,8 +193,7 @@ private:
     events_[j+1] = e;
 
     const dvs_msgs::Event& last_event = events_.back();
-    last_stamps_map_[e.x + e.y * sensor_size_.width] = last_event.ts;
-    last_polarity_map_[e.x + e.y * sensor_size_.width] = last_event.polarity;
+    events_history_->insertEvent(last_event);
   }
 
   void clearEventBuffer();
@@ -159,9 +239,7 @@ private:
   bool changed_frame_rate_;
   int median_blur_kernel_size_;
 
-  TimestampMap last_stamps_map_; // stamp of the last event that fell at every pixel
-  PolarityMap last_polarity_map_; // polarity of the last event that fell at every pixel
-
+  std::shared_ptr<EventHistoryMap> events_history_;
   EventBuffer events_;
   ImageBuffer images_;
   std::mutex data_mutex_;
