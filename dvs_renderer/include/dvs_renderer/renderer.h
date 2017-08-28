@@ -157,6 +157,7 @@ private:
   size_t frame_rate_hz_;
   bool synchronize_on_frames_;
   bool changed_frame_rate_;
+  int median_blur_kernel_size_;
 
   TimestampMap last_stamps_map_; // stamp of the last event that fell at every pixel
   PolarityMap last_polarity_map_; // polarity of the last event that fell at every pixel

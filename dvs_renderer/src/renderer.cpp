@@ -123,6 +123,7 @@ void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config
   frame_size_unit_ = (FrameSizeUnit) config.rendering_method;
   frame_size_ = (double) config.frame_size;
   synchronize_on_frames_ = config.synchronize_on_frames;
+  median_blur_kernel_size_ = config.median_blur;
 
   if(config.frame_rate != frame_rate_hz_)
   {
@@ -239,7 +240,6 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
     else
     {
       event_img = cv::Mat::zeros(sensor_size_, CV_64F);
-      std::vector<double> abs_dIdt_s;
       for(int y=0; y<sensor_size_.height; ++y)
       {
         for(int x=0; x<sensor_size_.width; ++x)
@@ -248,21 +248,17 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
           double dIdt = 0.0;
           if(last_stamp_at_xy.toSec() > 0)
           {
-            const double dt = (frame_end_stamp - last_stamp_at_xy).toSec();
+            const double dt_s = (frame_end_stamp - last_stamp_at_xy).toSec();
             const double pol = (last_polarity_map_[x + y*sensor_size_.width]) ? 1.0 : -1.0;
-            dIdt = (dt > 0) ? pol / dt : 0.0;
+            dIdt = (dt_s > 0) ? pol / dt_s : 0.0;
+            const double decay_s = frame_size_ / 1000000.0;
+            dIdt = pol * std::exp(-dt_s / decay_s);
             event_img.at<double>(y,x) = dIdt;
           }
-          abs_dIdt_s.push_back(dIdt);
         }
       }
-      std::sort(abs_dIdt_s.begin(), abs_dIdt_s.end());
-      static constexpr double percentile = 0.98;
-      static constexpr double max_dIdt = 60.0; // unit: intensity levels per second
-      double robust_max_dIdt = abs_dIdt_s[static_cast<int>(percentile * abs_dIdt_s.size() + 0.5)];
-      robust_max_dIdt = std::max(max_dIdt, robust_max_dIdt);
-      ROS_DEBUG("Robust max dIdt: %f", robust_max_dIdt);
-      event_img = 255.0 * (event_img + robust_max_dIdt) / (2.0 * robust_max_dIdt);
+      const double max_dIdt = std::log(5.0);
+      event_img = 255.0 * (event_img + max_dIdt) / (2.0 * max_dIdt);
       event_img.convertTo(event_img, CV_8U);
     }
   }
@@ -277,6 +273,11 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
   }
   else
   {
+    if(median_blur_kernel_size_ > 0)
+    {
+      cv::medianBlur(event_img, event_img, 2 * median_blur_kernel_size_ + 1);
+    }
+
     cv_image.encoding = "mono8";
     cv_image.image = event_img;
   }
