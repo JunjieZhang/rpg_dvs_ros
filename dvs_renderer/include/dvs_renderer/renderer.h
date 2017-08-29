@@ -199,6 +199,18 @@ private:
   void clearEventBuffer();
   void clearImageBuffer();
 
+  bool getLastTwoImages(cv::Mat* last_image, cv::Mat* second_to_last_image)
+  {
+    if(images_.size() < 2)
+      return false;
+
+    auto it = images_.rbegin();
+    *last_image = it->second.clone();
+    it++;
+    *second_to_last_image = it->second.clone();
+    return true;
+  }
+
   inline EventBuffer::iterator firstEventOlderThan(const ros::Time& stamp)
   {
     auto it = std::lower_bound(events_.begin(),
@@ -226,6 +238,7 @@ private:
 
   image_transport::Publisher image_pub_;
   image_transport::Publisher undistorted_image_pub_;
+  image_transport::Publisher image_difference_pub_;
 
   image_transport::Subscriber image_sub_;
 
@@ -236,6 +249,7 @@ private:
 
   size_t frame_rate_hz_;
   bool synchronize_on_frames_;
+  bool use_only_events_between_frames_;
   bool changed_frame_rate_;
   int median_blur_kernel_size_;
 

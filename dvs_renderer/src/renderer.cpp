@@ -31,6 +31,7 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   image_sub_ = it_.subscribe("image", 1, &Renderer::imageCallback, this);
   image_pub_ = it_.advertise("dvs_rendering", 1);
   undistorted_image_pub_ = it_.advertise("dvs_undistorted", 1);
+  image_difference_pub_ = it_.advertise("image_difference", 1);
 
   // Dynamic reconfigure
   dynamic_reconfigure_callback_ = boost::bind(&Renderer::changeParameterscallback, this, _1, _2);
@@ -42,7 +43,7 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   event_stats_[1].events_mean_[0] = nh_.advertise<std_msgs::Float32>("events_on_mean_5", 1);
   event_stats_[1].events_mean_[1] = nh_.advertise<std_msgs::Float32>("events_off_mean_5", 1);
 
-  frame_rate_hz_ = 60;
+  frame_rate_hz_ = 25;
   changed_frame_rate_ = true;
   synchronize_on_frames_ = false;
 
@@ -56,6 +57,7 @@ Renderer::~Renderer()
 {
   image_pub_.shutdown();
   undistorted_image_pub_.shutdown();
+  image_difference_pub_.shutdown();
 }
 
 void Renderer::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
@@ -89,6 +91,11 @@ void Renderer::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
 
 void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
 {
+  if(sensor_size_.width <= 0)
+  {
+    init(msg->width, msg->height);
+  }
+
   image_tracking_.imageCallback(msg);
 
   ROS_DEBUG("Image buffer size: %d", images_.size());
@@ -119,10 +126,20 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
 void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config, uint32_t level) {
   std::lock_guard<std::mutex> lock(data_mutex_);
 
+  ROS_DEBUG("Received parameter change callback.\n display_method=%d\n frame_size_unit=%d\n frame_size=%d\n synchronize_on_frames=%d\n use_only_events_between_frames=%d\n frame_rate=%d\n median_blur=%d\n",
+          config.use_color, config.rendering_method, config.frame_size, config.synchronize_on_frames, config.use_events_between_frames, config.frame_rate, config.median_blur);
   display_method_ = (config.use_color) ? RED_BLUE : GRAYSCALE;
   frame_size_unit_ = (FrameSizeUnit) config.rendering_method;
   frame_size_ = (double) config.frame_size;
   synchronize_on_frames_ = config.synchronize_on_frames;
+  use_only_events_between_frames_ = config.use_events_between_frames;
+
+  if(use_only_events_between_frames_ && !synchronize_on_frames_)
+  {
+    ROS_WARN("Cannot use only the events between frames when not in synchronize_on_frames mode.");
+    use_only_events_between_frames_ = false;
+  }
+
   median_blur_kernel_size_ = config.median_blur;
 
   if(config.frame_rate != frame_rate_hz_)
@@ -147,9 +164,6 @@ void Renderer::renderFrameLoop()
 
   while (ros::ok())
   {
-    if(synchronize_on_frames_)
-      continue;
-
     if(changed_frame_rate_)
     {
       ROS_INFO("Changing framerate to %d Hz", frame_rate_hz_);
@@ -157,9 +171,12 @@ void Renderer::renderFrameLoop()
       changed_frame_rate_ = false;
     }
 
-    r.sleep();
+    if(!synchronize_on_frames_)
+    {
+      renderAndPublishImageAtTime(events_.back().ts);
+    }
 
-    renderAndPublishImageAtTime(events_.back().ts);
+    r.sleep();
   }
 }
 
@@ -177,7 +194,15 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
     {
       EventBuffer::iterator it_frame_start;
       EventBuffer::iterator it_frame_end = firstEventOlderThan(frame_end_stamp);
-      if(frame_size_unit_ == MICROSECONDS)
+
+      if(images_.size() >= 2 && use_only_events_between_frames_)
+      {
+        auto it = images_.rbegin();
+        it--;
+        it_frame_start = firstEventOlderThan(it->first);
+        ROS_INFO("Frame start -> frame end: %f -> %f", it_frame_start->ts.toSec(), it_frame_end->ts.toSec());
+      }
+      else if(frame_size_unit_ == MICROSECONDS)
       {
         const double frame_duration_s = frame_size_ / 1000000.0;
         it_frame_start = firstEventOlderThan(frame_end_stamp - ros::Duration(frame_duration_s));
@@ -234,6 +259,11 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
     }
     else
     {
+      if(use_only_events_between_frames_)
+      {
+        ROS_WARN("use_only_events_between_frames mode is incompatible with the dI/dt mode. Will ignore that option.");
+      }
+      const bool use_polarity = true;
       const double decay_s = frame_size_ / 1000000.0;
       event_img = cv::Mat::zeros(sensor_size_, CV_64F);
       for(int y=0; y<sensor_size_.height; ++y)
@@ -249,13 +279,24 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
             {
               const double dt_s = (frame_end_stamp - last_stamp_at_xy).toSec();
               const double pol = (first_event_at_xy_before_frame_end.polarity) ? 1.0 : -1.0;
-              dIdt = pol * std::exp(-dt_s / decay_s);
+              dIdt = std::exp(-dt_s / decay_s);
+              if(use_polarity)
+              {
+                dIdt *= pol;
+              }
               event_img.at<double>(y,x) = dIdt;
             }
           }
         }
       }
-      event_img = 255.0 * (event_img + 1.0) / 2.0;
+      if(use_polarity)
+      {
+        event_img = 255.0 * (event_img + 1.0) / 2.0;
+      }
+      else
+      {
+        event_img = 255.0 * event_img;
+      }
       event_img.convertTo(event_img, CV_8U);
     }
   }
@@ -285,8 +326,33 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
   {
     cv_bridge::CvImage cv_image2;
     cv_image2.encoding = cv_image.encoding;
+    cv_image2.header.stamp = frame_end_stamp;
     cv::remap(cv_image.image, cv_image2.image, undistort_map1_, undistort_map2_, CV_INTER_LINEAR);
     undistorted_image_pub_.publish(cv_image2.toImageMsg());
+  }
+
+  // Publish the difference between the last two images
+  if(images_.size() >= 2 && image_difference_pub_.getNumSubscribers() > 0)
+  {
+    cv::Mat last_image, second_to_last_image;
+    static constexpr double eps = 0.001;
+    getLastTwoImages(&last_image, &second_to_last_image);
+
+    last_image.convertTo(last_image, CV_64F, 1.0/255.0, 0.0);
+    cv::log(eps + last_image, last_image);
+
+    second_to_last_image.convertTo(second_to_last_image, CV_64F, 1.0/255.0, 0.0);
+    cv::log(eps + second_to_last_image, second_to_last_image);
+
+    cv::Mat delta_logI = last_image - second_to_last_image;
+    cv_bridge::CvImage cv_image3;
+    cv_image3.encoding = "mono8";
+    cv_image3.header.stamp = frame_end_stamp;
+
+    const double max_delta_logI = -std::log(eps);
+    delta_logI = 255.0 * (delta_logI + max_delta_logI) / (2.0 * max_delta_logI);
+    delta_logI.convertTo(cv_image3.image, CV_8U);
+    image_difference_pub_.publish(cv_image3.toImageMsg());
   }
 }
 
