@@ -247,7 +247,7 @@ private:
 
   cv::Size sensor_size_;
 
-  size_t frame_rate_hz_;
+  int frame_rate_hz_;
   bool synchronize_on_frames_;
   bool use_only_events_between_frames_;
   bool changed_frame_rate_;

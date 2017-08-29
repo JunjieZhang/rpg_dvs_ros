@@ -43,9 +43,9 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
   event_stats_[1].events_mean_[0] = nh_.advertise<std_msgs::Float32>("events_on_mean_5", 1);
   event_stats_[1].events_mean_[1] = nh_.advertise<std_msgs::Float32>("events_off_mean_5", 1);
 
-  frame_rate_hz_ = 25;
+  nh_private.param<int>("frame_rate", frame_rate_hz_, 30);
   changed_frame_rate_ = true;
-  synchronize_on_frames_ = false;
+  nh_private.param<bool>("synchronize_on_frames", synchronize_on_frames_, false);
 
   reset();
 
