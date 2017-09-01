@@ -24,7 +24,7 @@ Renderer::Renderer(ros::NodeHandle & nh, ros::NodeHandle nh_private) : nh_(nh),
     image_tracking_(nh)
 {
   // setup subscribers and publishers
-  event_sub_ = nh_.subscribe("events", 1, &Renderer::eventsCallback, this);
+  event_sub_ = nh_.subscribe("events", 0, &Renderer::eventsCallback, this);
   camera_info_sub_ = nh_.subscribe("camera_info", 1, &Renderer::cameraInfoCallback, this);
 
   image_transport::ImageTransport it_(nh_);
