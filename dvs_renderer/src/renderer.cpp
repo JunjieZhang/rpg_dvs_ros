@@ -175,6 +175,10 @@ void Renderer::renderFrameLoop()
     {
       renderAndPublishImageAtTime(events_.back().ts);
     }
+    else if(!images_.empty())
+    {
+      renderAndPublishImageAtTime(images_.rbegin()->first);
+    }
 
     r.sleep();
   }
