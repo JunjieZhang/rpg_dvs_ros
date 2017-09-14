@@ -159,6 +159,7 @@ private:
     got_camera_info_ = false;
     events_.clear();
     images_.clear();
+    frame_idx_ = 0;
 
     if(events_history_)
       events_history_->clear();
@@ -252,10 +253,12 @@ private:
   bool use_only_events_between_frames_;
   bool changed_frame_rate_;
   int median_blur_kernel_size_;
+  int keep_every_nth_frame_;
 
   std::shared_ptr<EventHistoryMap> events_history_;
   EventBuffer events_;
   ImageBuffer images_;
+  size_t frame_idx_;
   std::mutex data_mutex_;
 
   struct EventStats {

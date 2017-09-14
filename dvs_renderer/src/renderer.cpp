@@ -98,6 +98,12 @@ void Renderer::imageCallback(const sensor_msgs::Image::ConstPtr& msg)
 
   image_tracking_.imageCallback(msg);
 
+  if(frame_idx_++ % keep_every_nth_frame_ != 0)
+  {
+    ROS_DEBUG("Ignoring standard frame: %d", frame_idx_);
+    return;
+  }
+
   ROS_DEBUG("Image buffer size: %d", images_.size());
   cv_bridge::CvImagePtr cv_ptr;
 
@@ -133,6 +139,7 @@ void Renderer::changeParameterscallback(dvs_renderer::DVS_RendererConfig &config
   frame_size_ = (double) config.frame_size;
   synchronize_on_frames_ = config.synchronize_on_frames;
   use_only_events_between_frames_ = config.use_events_between_frames;
+  keep_every_nth_frame_ = config.keep_every_nth_frame;
 
   if(use_only_events_between_frames_ && !synchronize_on_frames_)
   {
@@ -233,7 +240,7 @@ void Renderer::renderAndPublishImageAtTime(const ros::Time& frame_end_stamp)
         }
         else
         {
-          static constexpr double max_img_delay_s = 0.5;
+          static constexpr double max_img_delay_s = 5.0;
           const ros::Time last_event_stamp = events_.back().ts;
           const ros::Time last_img_stamp = images_.rbegin()->first;
           ROS_DEBUG("Image stamp: %f", last_img_stamp);
